@@ -474,33 +474,38 @@ async def main():
     @client.on(events.NewMessage(pattern=r'\.help$'))
     async def help_handler(event):
         if (await event.get_sender()).id != my_id: return
-        HELP = f"""{GL.BOLD}{GL.grad(" USERBOT COMMANDS ")}{GL.RESET}
-{GL.BLUE}INFORMATION{GL.RESET}
-  {GL.GREEN}.help{GL.RESET}         - This help
-  {GL.GREEN}.id{GL.RESET}           - Chat/user IDs
-  {GL.GREEN}.whois <u>{GL.RESET}    - Quick user lookup
-  {GL.GREEN}.info <u> <f>{GL.RESET} - Full dossier HTML (-s for JSON)
-  {GL.GREEN}.system{GL.RESET}       - Bot runtime info
-  {GL.GREEN}.chats [N]{GL.RESET}    - List dialogs
-  {GL.GREEN}.ping{GL.RESET}         - Latency check
-{GL.BLUE}ANALYSIS{GL.RESET}
-  {GL.GREEN}.logs <u> <f>{GL.RESET}  - Message history HTML
-  {GL.GREEN}.stats{GL.RESET}        - Your account stats
-  {GL.GREEN}.top [N]{GL.RESET}      - Top users in chat
-  {GL.GREEN}.activity{GL.RESET}     - Hourly activity
-  {GL.GREEN}.search <q>{GL.RESET}   - Search messages
-{GL.BLUE}TOOLS{GL.RESET}
-  {GL.GREEN}.echo <t>{GL.RESET}     - Repeat text
-  {GL.GREEN}.type <t>{GL.RESET}     - Typewriter effect
-  {GL.GREEN}.purge [N]{GL.RESET}    - Delete last N messages
-  {GL.GREEN}.save <t>{GL.RESET}     - Save a note
-  {GL.GREEN}.notes{GL.RESET}        - Show notes
-  {GL.GREEN}.delnote <N>{GL.RESET}  - Delete note
-{GL.BLUE}UTILITIES{GL.RESET}
-  {GL.GREEN}.neuro <t>{GL.RESET}    - AI via @TypespaceBot
-  {GL.GREEN}.afk [r]{GL.RESET}      - AFK mode (auto-reply)
-{GL.DIM}Type 'stop' to quit{GL.RESET}"""
-        await client.edit_message(event.chat_id, event.message.id, HELP)
+        HELP = """<b>USERBOT COMMANDS</b>
+
+<b>INFORMATION</b>
+  <code>.help</code>         - This help
+  <code>.id</code>           - Chat/user IDs
+  <code>.whois &lt;u&gt;</code>    - Quick user lookup
+  <code>.info &lt;u&gt; &lt;f&gt;</code> - Full dossier HTML (-s for JSON)
+  <code>.system</code>       - Bot runtime info
+  <code>.chats [N]</code>    - List dialogs
+  <code>.ping</code>         - Latency check
+
+<b>ANALYSIS</b>
+  <code>.logs &lt;u&gt; &lt;f&gt;</code>  - Message history HTML
+  <code>.stats</code>        - Your account stats
+  <code>.top [N]</code>      - Top users in chat
+  <code>.activity</code>     - Hourly activity
+  <code>.search &lt;q&gt;</code>   - Search messages
+
+<b>TOOLS</b>
+  <code>.echo &lt;t&gt;</code>     - Repeat text
+  <code>.type &lt;t&gt;</code>     - Typewriter effect
+  <code>.purge [N]</code>    - Delete last N messages
+  <code>.save &lt;t&gt;</code>     - Save a note
+  <code>.notes</code>        - Show notes
+  <code>.delnote &lt;N&gt;</code>  - Delete note
+
+<b>UTILITIES</b>
+  <code>.neuro &lt;t&gt;</code>    - AI via @TypespaceBot
+  <code>.afk [r]</code>      - AFK mode (auto-reply)
+
+<i>Type 'stop' to quit</i>"""
+        await client.edit_message(event.chat_id, event.message.id, HELP, parse_mode='html')
 
     @client.on(events.NewMessage(pattern=r'\.id$'))
     async def id_handler(event):
@@ -669,7 +674,10 @@ async def main():
         out = ""
         for ch in txt:
             out += ch
-            await client.edit_message(event.chat_id, event.message.id, out)
+            try:
+                await client.edit_message(event.chat_id, event.message.id, out)
+            except tlerrors.MessageNotModifiedError:
+                pass
             await asyncio.sleep(0.1)
 
     @client.on(events.NewMessage(pattern=r'\.save\s+(.+)'))
