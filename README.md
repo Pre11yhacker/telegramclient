@@ -148,7 +148,7 @@
 
 ### Быстрая установка
 ```bash
-git clone https://github.com/Pre11yhacker/telegramclient
+git clone https://github.com/Pre11yhacker/telegramclient.git
 cd telegramclient
 pip install telethon
 python userbot.py
