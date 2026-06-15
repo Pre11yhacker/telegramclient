@@ -225,25 +225,174 @@ def format_status(status):
     if isinstance(status, UserStatusLastMonth): return "this month"
     return "unknown"
 
+def chat_type(ch):
+    from telethon.tl.types import Chat as BasicChat
+    if isinstance(ch, BasicChat): return 'basic_group'
+    if getattr(ch, 'forum', False): return 'forum'
+    if getattr(ch, 'gigagroup', False): return 'gigagroup'
+    if getattr(ch, 'megagroup', False): return 'supergroup'
+    if getattr(ch, 'broadcast', False): return 'channel'
+    return type(ch).__name__
+
 def esc(s):
     if s is None: return ""
     return str(s).replace("&","&amp;").replace("<","&lt;").replace(">","&gt;").replace('"',"&quot;")
 
 async def get_gifts(client, uid):
+    out = []
+    fallback_self = False
     try:
-        full = await client(GetFullUserRequest(uid))
-        uf = getattr(full, 'full_user', full)
-        if hasattr(uf, 'gifts') and uf.gifts:
-            out = []
-            for g in uf.gifts:
-                e = {'id': getattr(g, 'id', None)}
-                if hasattr(g, 'name'): e['name'] = g.name
-                if hasattr(g, 'message') and g.message:
-                    e['message'] = g.message.text if hasattr(g.message, 'text') else str(g.message)
-                out.append(e)
-            return out
-        cnt = getattr(uf, 'gifts_count', 0) or 0
-        if cnt: return {'gifts_count': cnt}
+        from telethon.tl.functions.payments import GetSavedStarGiftsRequest
+        from telethon.tl.types import DocumentAttributeSticker, InputUserSelf, StarGiftAttributeModel, StarGiftAttributePattern, StarGiftBackground
+        me = await client.get_me()
+        is_self = (uid == me.id)
+        peer = InputUserSelf() if is_self else await client.get_entity(uid)
+        r = await client(GetSavedStarGiftsRequest(peer=peer, offset='', limit=100))
+        items = getattr(r, 'gifts', []) or []
+        if not items and not is_self:
+            r2 = await client(GetSavedStarGiftsRequest(peer=InputUserSelf(), offset='', limit=100))
+            items = getattr(r2, 'gifts', []) or []
+            if items: fallback_self = True
+        print(GL.task("Gifts", "ok", f"{len(items)} gifts for {'self' if is_self else uid}{'(fallback bot)' if fallback_self else ''}"), flush=True)
+        for g in items:
+            e = {'fallback': fallback_self}
+            e['id'] = str(getattr(g, 'id', ''))
+            e['gift_num'] = getattr(g, 'gift_num', None)
+            e['name_hidden'] = getattr(g, 'name_hidden', False)
+            sg = getattr(g, 'gift', None) or getattr(g, 'star_gift', None)
+            if sg:
+                e['name'] = str(getattr(sg, 'title', None) or getattr(sg, 'name', None) or sg.id)
+                e['stars'] = getattr(sg, 'stars', 0)
+                if getattr(sg, 'limited', False): e['limited'] = True
+                if getattr(sg, 'birthday', False): e['birthday'] = True
+                bg = getattr(sg, 'background', None)
+                if bg and isinstance(bg, StarGiftBackground):
+                    e['bg_center'] = getattr(bg, 'center_color', None)
+                    e['bg_edge'] = getattr(bg, 'edge_color', None)
+                uv = getattr(sg, 'upgrade_variants', None)
+                if uv:
+                    for attr in uv:
+                        if isinstance(attr, StarGiftAttributeModel):
+                            e['model_name'] = getattr(attr, 'name', None)
+                            e['model_rarity'] = getattr(attr, 'rarity', None)
+                        elif isinstance(attr, StarGiftAttributePattern):
+                            e['pattern_name'] = getattr(attr, 'name', None)
+                            e['pattern_rarity'] = getattr(attr, 'rarity', None)
+                sticker = getattr(sg, 'sticker', None)
+                if sticker:
+                    for attr in getattr(sticker, 'attributes', []):
+                        if isinstance(attr, DocumentAttributeSticker) and getattr(attr, 'alt', None):
+                            e['emoji'] = attr.alt
+                            break
+                    # Download sticker image via DC, try thumbs first, then full
+                    thumbs = getattr(sticker, 'thumbs', []) or []
+                    thumb_sizes = []
+                    for t in thumbs:
+                        tb = getattr(t, 'bytes', None)
+                        if tb and isinstance(tb, bytes) and len(tb) > 100:
+                            # Only embed bytes with valid image headers
+                            if tb[:4] == b'\x89PNG':
+                                e['sticker_b64'] = 'data:image/png;base64,' + base64.b64encode(tb).decode()
+                                break
+                            if tb[:2] == b'\xFF\xD8':
+                                e['sticker_b64'] = 'data:image/jpeg;base64,' + base64.b64encode(tb).decode()
+                                break
+                            if tb[:4] == b'RIFF' and len(tb) > 12 and tb[8:12] == b'WEBP':
+                                e['sticker_b64'] = 'data:image/webp;base64,' + base64.b64encode(tb).decode()
+                                break
+                        ts = getattr(t, 'type', '')
+                        if ts in ('s', 'm', 'x'): thumb_sizes.append(ts)
+                    if not e.get('sticker_b64'):
+                        thumb_sizes = list(dict.fromkeys(thumb_sizes)) or ['s']
+                        from telethon.tl.types import InputDocumentFileLocation
+                        for ts in thumb_sizes:
+                            try:
+                                loc = InputDocumentFileLocation(id=sticker.id, access_hash=sticker.access_hash, file_reference=sticker.file_reference, thumb_size=ts)
+                                data = await client.download_file(loc)
+                                if data and len(data) > 100:
+                                    if data[:4] == b'\x89PNG': fmt2 = 'image/png'
+                                    elif data[:2] == b'\xFF\xD8': fmt2 = 'image/jpeg'
+                                    elif data[:4] == b'RIFF' and len(data) > 12 and data[8:12] == b'WEBP': fmt2 = 'image/webp'
+                                    else: fmt2 = 'image/jpeg'
+                                    e['sticker_b64'] = f'data:{fmt2};base64,' + base64.b64encode(data).decode()
+                                    break
+                            except:
+                                pass
+            else:
+                e['name'] = str(getattr(g, 'id', '?'))
+            raw_msg = getattr(g, 'message', None)
+            if raw_msg: e['message'] = raw_msg.text if hasattr(raw_msg, 'text') else str(raw_msg)
+            gdate = getattr(g, 'date', None)
+            if gdate:
+                if isinstance(gdate, datetime): e['date'] = gdate.strftime('%Y-%m-%d %H:%M')
+                elif isinstance(gdate, (int, float)): e['date'] = datetime.fromtimestamp(gdate).strftime('%Y-%m-%d %H:%M')
+                else: e['date'] = str(gdate)
+            from_id = getattr(g, 'from_id', None)
+            if from_id:
+                try:
+                    sender = await client.get_entity(from_id)
+                    e['sender_id'] = sender.id
+                    e['sender_name'] = getattr(sender, 'first_name', '') or str(sender.id)
+                    if getattr(sender, 'username', None): e['sender_username'] = '@' + sender.username
+                except: pass
+            out.append(e)
+    except Exception as ex:
+        print(GL.task("Gifts", "err", f"{ex}"), flush=True)
+    return out
+
+async def get_user_chats(client, target, limit=100):
+    import asyncio
+    out = []
+    try:
+        from telethon.tl.functions.channels import GetParticipantRequest
+        from telethon.tl.functions.messages import GetFullChatRequest
+        from telethon.tl.types import Chat as BasicChat
+        from telethon.errors import UserNotParticipantError
+        dialogs = await client.get_dialogs(limit=limit)
+        print(GL.task("Chats", "info", f"scanning {len(dialogs)} dialogs for {target.id}..."), flush=True)
+        sem = asyncio.Semaphore(10)
+        async def check(d):
+            if not (d.is_group or d.is_channel): return None
+            async with sem:
+                ent = d.entity
+                try:
+                    if isinstance(ent, BasicChat):
+                        fc = await client(GetFullChatRequest(chat_id=ent.id))
+                        pts = getattr(fc, 'full_chat', None)
+                        if pts:
+                            parts = getattr(pts, 'participants', None)
+                            if parts and hasattr(parts, 'participants'):
+                                ids = [getattr(p, 'user_id', None) for p in parts.participants]
+                                if target.id not in ids: return None
+                    else:
+                        await client(GetParticipantRequest(channel=ent, participant=target.id))
+                    t = chat_type(ent)
+                    is_private = not bool(getattr(ent, 'username', None))
+                    return {'id': ent.id, 'title': getattr(ent, 'title', '') or str(ent.id), 'type': t, 'private': is_private}
+                except (UserNotParticipantError, ValueError):
+                    return None
+                except Exception as ex:
+                    print(GL.task("Chats", "warn", f"check {getattr(ent,'title','')}: {type(ent).__name__}: {ex}"), flush=True)
+                    return None
+        coros = [check(d) for d in dialogs]
+        all_r = await asyncio.gather(*coros)
+        out = [r for r in all_r if r is not None]
+        out.sort(key=lambda x: x.get('title','').lower())
+        print(GL.task("Chats", "ok", f"found {len(out)} chats"), flush=True)
+    except Exception as ex:
+        print(GL.task("Chats", "err", f"{ex}"), flush=True)
+    return out
+
+
+async def get_profile_photo_b64(client, user):
+    try:
+        buf = io.BytesIO()
+        result = await client.download_profile_photo(user, file=buf)
+        if result:
+            buf.seek(0)
+            data = buf.read()
+            if data and len(data) > 100:
+                return "data:image/jpeg;base64," + base64.b64encode(data).decode()
     except: pass
     return None
 
@@ -343,9 +492,37 @@ body{font-family:Inter,system-ui,sans-serif;background:var(--bg);color:var(--t0)
 .log-type{color:var(--t2);min-width:60px;font-size:11px}
 .log-body{flex:1;min-width:200px}
 .flag{display:inline-flex;padding:2px 6px;border-radius:4px;font-size:9px;font-weight:700;background:rgba(91,164,255,0.10);color:var(--a1);margin:1px}
-.chat-item{display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border);font-size:13px}
+.flag.lock{background:rgba(255,79,110,0.10);color:var(--red)}
+.flag.pub{background:rgba(61,255,160,0.10);color:var(--gr)}
+.chat-item{display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--border);font-size:13px}
+.chat-title{flex:1}
 .chat-id{color:var(--t2);font-family:JetBrains Mono,monospace;font-size:11px}
-.gift{padding:8px 0;font-size:13px}
+.gift{padding:10px 0;font-size:13px}
+.gift-card{background:var(--surface2);border:1px solid var(--border);border-radius:16px;padding:22px;margin:12px 0;text-align:center}
+.gift-card:hover{border-color:var(--border-hi)}
+.gift-sticker{width:96px;height:96px;object-fit:contain;margin-bottom:8px}
+.gift-emoji{font-size:72px;line-height:1.1;margin-bottom:8px}
+.gift-name-row{font-size:15px;font-weight:700;color:var(--t0)}
+.gift-from{font-size:12px;color:var(--t2);margin-top:4px}
+.gift-msg{font-size:13px;color:var(--t1);margin-top:6px;padding:8px 10px;background:rgba(255,255,255,0.04);border-radius:8px}
+.gift-date{font-size:11px;color:var(--t2);margin-top:2px}
+.gift-badge{display:inline-flex;padding:1px 6px;border-radius:4px;font-size:9px;font-weight:700;margin-left:6px;vertical-align:middle}
+.gift-badge.limited{background:rgba(139,92,246,0.15);color:var(--a2)}
+.gift-badge.birthday{background:rgba(255,179,71,0.15);color:var(--or)}
+.gift-badge.hidden{background:rgba(255,255,255,0.08);color:var(--t2)}
+.gift-badge.nft{background:rgba(139,92,246,0.2);color:var(--a2);border:1px solid rgba(139,92,246,0.35)}
+.gift-rare{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.5px}
+.gift-rare.r0{color:#8a9bb5}
+.gift-rare.r1{color:#4cd964}
+.gift-rare.r2{color:#5ba4ff}
+.gift-rare.r3{color:#b06aff}
+.gift-rare.r4{color:#ff9500}
+.gift-rare.r5{color:#ff3b30}
+.gift-num{font-size:14px;font-weight:700;color:var(--a2);margin-top:4px;letter-spacing:.5px}
+.gift-extra{font-size:11px;color:var(--t2);margin-top:2px}
+.pp-wrap{display:flex;align-items:center;gap:20px;margin-bottom:24px}
+.pp-img{width:90px;height:90px;border-radius:50%;object-fit:cover;border:2px solid var(--border-hi);flex-shrink:0}
+.pp-placeholder{width:90px;height:90px;border-radius:50%;background:var(--surface2);border:2px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:32px;color:var(--t2);flex-shrink:0}
 """
 
 def build_info_html(data):
@@ -367,28 +544,109 @@ def build_info_html(data):
         unames += f'<span class="{c}">{"NFT" if u.get("nft") else "@"}{esc(u.get("username",""))}</span>'
     if not unames: unames = '<span style="color:var(--t2)">none</span>'
     chats = ''
-    for ch in (data.get('common_chats') or [])[:30]:
-        chats += f'<div class="chat-item"><span>{esc(str(ch.get("title","")))}</span><span class="chat-id">{ch.get("id","")}</span></div>'
+    for ch in (data.get('common_chats') or []):
+        ch_type = ch.get('type', '')
+        icons = {'channel':'📢','supergroup':'👥','group':'👥','gigagroup':'💬','forum':'🗣️','chat':'👤','megagroup':'👥','broadcast':'📢'}
+        icon = icons.get(ch_type.lower(), '📁')
+        acc = '<span class="flag lock">🔒</span>' if ch.get('private') else '<span class="flag pub">🌐</span>'
+        chats += f'<div class="chat-item">{acc}{icon}{esc(ch_type)}<span class="chat-title">{esc(str(ch.get("title","")))}</span><span class="chat-id">{ch.get("id","")}</span></div>'
     if not chats: chats = '<p style="color:var(--t2)">no common chats</p>'
-    gifts = ''; gd = data.get('gifts')
-    if isinstance(gd,list) and gd:
+    gd = data.get('gifts') or []
+    gc = len(gd) if isinstance(gd, list) else 0
+    has_gift_details = bool(gd)
+    gifts = ''
+    if has_gift_details:
+        is_fallback = any(g.get('fallback') for g in gd)
+        label = ' (bot)' if is_fallback else ''
         for g in gd:
+            sticker_b64 = g.get('sticker_b64', '')
+            emoji = g.get('emoji', '🎁')
+            icon = f'<img class="gift-sticker" src="{sticker_b64}" alt="">' if sticker_b64 else f'<div class="gift-emoji">{emoji}</div>'
             nm = esc(str(g.get('name') or g.get('id') or '?'))
+            is_nft = g.get('gift_num') is not None
+            if is_nft:
+                bg_center = g.get('bg_center')
+                bg_edge = g.get('bg_edge')
+                bg_style = ''
+                if bg_center or bg_edge:
+                    c = bg_center or '#888'
+                    e = bg_edge or '#444'
+                    bg_style = f' style="background:linear-gradient(135deg,{e},{c})"'
+                num_html = f'<div class="gift-num">#{g["gift_num"]}</div>'
+                extra_info = ''
+                if g.get('model_name'):
+                    r = str(g.get('model_rarity', ''))
+                    r_cls = ''
+                    if r.isdigit(): r_cls = f' <span class="gift-rare r{r}">{r}</span>'
+                    extra_info += f'<div class="gift-extra">Model: {esc(g["model_name"])}{r_cls}</div>'
+                if g.get('pattern_name'):
+                    r = str(g.get('pattern_rarity', ''))
+                    r_cls = ''
+                    if r.isdigit(): r_cls = f' <span class="gift-rare r{r}">{r}</span>'
+                    extra_info += f'<div class="gift-extra">Pattern: {esc(g["pattern_name"])}{r_cls}</div>'
+                gb = '<span class="gift-badge nft">NFT</span>'
+                if g.get('limited'): gb += '<span class="gift-badge limited">LIMITED</span>'
+                if g.get('birthday'): gb += '<span class="gift-badge birthday">BIRTHDAY</span>'
+                if g.get('name_hidden'): gb += '<span class="gift-badge hidden">HIDDEN</span>'
+            else:
+                bg_style = ''
+                num_html = ''
+                extra_info = ''
+                gb = ''
+                if g.get('limited'): gb += '<span class="gift-badge limited">LIMITED</span>'
+                if g.get('birthday'): gb += '<span class="gift-badge birthday">BIRTHDAY</span>'
+                if g.get('name_hidden'): gb += '<span class="gift-badge hidden">HIDDEN</span>'
             msg = esc(str(g.get('message') or ''))
-            gifts += f'<div class="gift"><b>{nm}</b>{" - " + msg if msg else ""}</div>'
-    elif isinstance(gd,dict) and gd.get('gifts_count'):
-        gifts = f'<div class="gift">Gifts: {gd["gifts_count"]}</div>'
+            snd = ''
+            if g.get('sender_name'):
+                snd = f'<div class="gift-from">from <b>{esc(g["sender_name"])}</b>'
+                if g.get('sender_username'): snd += f' {esc(g["sender_username"])}'
+                snd += '</div>'
+            gd_str = ''
+            if g.get('date'): gd_str = f'<div class="gift-date">{esc(g["date"])}</div>'
+            msg_html = f'<div class="gift-msg">{msg}</div>' if msg else ''
+            gifts += f'<div class="gift-card"{bg_style}>{icon}<div class="gift-name-row">{nm}{gb}</div>{num_html}{extra_info}{snd}{gd_str}{msg_html}</div>'
     else:
-        gifts = '<p style="color:var(--t2)">no gifts</p>'
+        sg_cnt = data.get('stargifts_count', 0)
+        if sg_cnt:
+            gifts = f'<p style="color:var(--t2)">{sg_cnt} gifts (hidden)</p>'
+        else:
+            gifts = '<p style="color:var(--t2)">no gifts</p>'
+    bio_links = data.get('links_in_bio') or []
+    bio_links_html = ''
+    if bio_links:
+        for l in bio_links[:10]:
+            bio_links_html += f'<span class="uname-pill">{esc(l)}</span>'
+    reg = data.get('registration_date') or ''
+    reg_html = ''
+    if reg:
+        reg_html = f'<div class="info-row"><span class="info-lbl">Registered</span><span class="info-val hi">{esc(reg)}</span></div>'
+    age = data.get('account_age') or ''
+    if age:
+        reg_html += f'<div class="info-row"><span class="info-lbl">Account Age</span><span class="info-val">{esc(age)}</span></div>'
     extra = ''
     if data.get('stories_count'): extra += f'<div class="info-row"><span class="info-lbl">Stories</span><span class="info-val hi">{data["stories_count"]}</span></div>'
     if data.get('followers_count'): extra += f'<div class="info-row"><span class="info-lbl">Followers</span><span class="info-val hi">{data["followers_count"]}</span></div>'
+    if data.get('contacts_count'): extra += f'<div class="info-row"><span class="info-lbl">Contacts</span><span class="info-val hi">{data["contacts_count"]}</span></div>'
+    if data.get('lang_code'): extra += f'<div class="info-row"><span class="info-lbl">Language</span><span class="info-val">{esc(data["lang_code"])}</span></div>'
+    if data.get('emoji_status'): extra += f'<div class="info-row"><span class="info-lbl">Emoji Status</span><span class="info-val">{esc(data["emoji_status"])}</span></div>'
+    if data.get('photos_count') is not None: extra += f'<div class="info-row"><span class="info-lbl">Profile Photos</span><span class="info-val hi">{data["photos_count"]}</span></div>'
+    if data.get('stargifts_count') is not None: extra += f'<div class="info-row"><span class="info-lbl">Star Gifts</span><span class="info-val hi">{data["stargifts_count"]}</span></div>'
     if data.get('wallpaper'): extra += '<div class="info-row"><span class="info-lbl">Wallpaper</span><span class="info-val hi">yes</span></div>'
+    if data.get('phone_calls') is not None: extra += f'<div class="info-row"><span class="info-lbl">Phone Calls</span><span class="info-val">{esc(data["phone_calls"])}</span></div>'
+    if data.get('voice_messages') is not None: extra += f'<div class="info-row"><span class="info-lbl">Voice Messages</span><span class="info-val">{esc(data["voice_messages"])}</span></div>'
+    if data.get('auto_delete'): extra += f'<div class="info-row"><span class="info-lbl">Auto-Delete</span><span class="info-val">{esc(data["auto_delete"])}</span></div>'
+    if data.get('forward_name'): extra += f'<div class="info-row"><span class="info-lbl">Forward Name</span><span class="info-val">{esc(data["forward_name"])}</span></div>'
+    photo_b64 = data.get('photo_b64') or ''
+    if photo_b64:
+        photo_html = f'<div class="pp-wrap"><img class="pp-img" src="{photo_b64}" alt="photo"><div><div class="page-title" style="margin:0;font-size:24px">{full_name}</div><div class="page-sub" style="margin-top:4px">ID {uid} &middot; {gen}</div></div></div>'
+    else:
+        photo_html = f'<div class="pp-wrap"><div class="pp-placeholder">?</div><div><div class="page-title" style="margin:0;font-size:24px">{full_name}</div><div class="page-sub" style="margin-top:4px">ID {uid} &middot; {gen}</div></div></div>'
     return f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Dossier - {full_name}</title><style>{GLASS_CSS}</style></head><body>
 <div class="wrap">
-<div class="page-header"><div class="page-title">{full_name}</div><div class="page-sub">ID {uid} &middot; {gen}</div></div>
+{photo_html}
 <div class="card"><div class="slabel">Status</div><div>{badges}</div></div>
 <div class="card"><div class="slabel">Info</div><div class="info-grid">
 <div class="info-row"><span class="info-lbl">ID</span><span class="info-val hi">{uid}</span></div>
@@ -396,11 +654,11 @@ def build_info_html(data):
 <div class="info-row"><span class="info-lbl">Last</span><span class="info-val">{last or "-"}</span></div>
 <div class="info-row"><span class="info-lbl">Phone</span><span class="info-val">{phone}</span></div>
 <div class="info-row"><span class="info-lbl">Online</span><span class="info-val">{online}</span></div>
-<div class="info-row"><span class="info-lbl">Common Chats</span><span class="info-val hi">{data.get("common_chats_count",0)}</span></div>{extra}</div></div>
+<div class="info-row"><span class="info-lbl">Common Chats</span><span class="info-val hi">{data.get("common_chats_count",0)}</span></div>{reg_html}{extra}</div></div>
 <div class="card"><div class="slabel">Usernames</div><div>{unames}</div></div>
-<div class="card"><div class="slabel">Bio</div><p style="white-space:pre-wrap">{bio or "(empty)"}</p></div>
-<div class="card"><div class="slabel">Gifts</div>{gifts}</div>
-<div class="card"><div class="slabel">Common Chats</div>{chats}</div>
+<div class="card"><div class="slabel">Bio</div><p style="white-space:pre-wrap">{bio or "(empty)"}</p>{'<div style="margin-top:10px">' + bio_links_html + '</div>' if bio_links_html else ""}</div>
+<div class="card"><div class="slabel">Common Chats ({data.get("common_chats_count",0)})</div>{chats}</div>
+<div class="card"><div class="slabel">Gifts{label} ({gc})</div>{gifts}</div>
 <div class="page-footer">made by @s1lentpacket &middot; {gen}</div>
 </div></body></html>"""
 
@@ -483,6 +741,7 @@ async def main():
   <code>.info &lt;u&gt; &lt;f&gt;</code> - Full dossier HTML (-s for JSON)
   <code>.system</code>       - Bot runtime info
   <code>.chats [N]</code>    - List dialogs
+  <code>.commonchats &lt;u&gt;</code> - Common chats with user
   <code>.ping</code>         - Latency check
 
 <b>ANALYSIS</b>
@@ -551,6 +810,28 @@ async def main():
             lines.append(f"[{d.id}] {d.name or '???'} ({d.unread_count} unread)")
         txt = "\n".join(lines)
         await client.edit_message(event.chat_id, mid, f"<pre>{txt}</pre>", parse_mode='html')
+
+    @client.on(events.NewMessage(pattern=r'\.commonchats\s+(\S+)'))
+    async def commonchats_handler(event):
+        if (await event.get_sender()).id != my_id: return
+        target = event.pattern_match.group(1).strip(); mid = event.message.id
+        await client.edit_message(event.chat_id, mid, "Resolving...")
+        try:
+            user = await client.get_entity(resolve_target(target))
+        except Exception as e:
+            await client.edit_message(event.chat_id, mid, f"Error: {e}"); return
+        await client.edit_message(event.chat_id, mid, f"Fetching chats for {user.id}...")
+        try:
+            ch_list = await get_user_chats(client, user, limit=100)
+            lines = [f"Chats for {getattr(user,'first_name','') or user.id}: {len(ch_list)}"]
+            for ch in ch_list[:50]:
+                lock = '🔒' if ch.get('private') else '🌐'
+                lines.append(f"{lock}[{ch['id']}] {ch.get('title','?')} ({ch.get('type','?')})")
+            if not ch_list: lines = [f"No chats found for {user.id}"]
+            txt = "\n".join(lines)
+            await client.edit_message(event.chat_id, mid, f"<pre>{txt}</pre>", parse_mode='html')
+        except Exception as e:
+            await client.edit_message(event.chat_id, mid, f"Error: {e}")
 
     @client.on(events.NewMessage(pattern=r'\.stats$'))
     async def stats_handler(event):
@@ -748,9 +1029,9 @@ async def main():
             uf = getattr(raw,'full_user',raw)
             common_chats = []
             try:
-                cc = await client(GetCommonChatsRequest(peer=user,max_id=0,limit=100))
-                common_chats = [{'id':ch.id,'title':getattr(ch,'title',str(ch.id))} for ch in cc.chats]
+                common_chats = await get_user_chats(client, user, limit=100)
             except: pass
+            ccnt = len(common_chats)
             gifts = await get_gifts(client,user.id)
             bio_text = (getattr(uf,'about','') or '') if uf else ''
             bio_links = re.findall(r'https?://[^\s]+|@[a-zA-Z0-9_]+',bio_text)
@@ -762,16 +1043,50 @@ async def main():
                     e = {'username':getattr(u,'username',str(u)),'active':getattr(u,'active',False),'nft':getattr(u,'editable',None) is False}
                     if not any(x['username']==e['username'] for x in unames): unames.append(e)
             ccnt = (getattr(uf,'common_chats_count',0) or len(common_chats)) if uf else len(common_chats)
+            reg_date = getattr(user, 'date', None)
+            registration_date_str = ''; account_age_str = ''
+            if reg_date:
+                if isinstance(reg_date, datetime): dt = reg_date
+                elif isinstance(reg_date, (int, float)): dt = datetime.fromtimestamp(reg_date)
+                else: dt = None
+                if dt:
+                    registration_date_str = dt.strftime('%Y-%m-%d %H:%M:%S UTC')
+                    age_days = (datetime.now() - dt).days
+                    account_age_str = f"{age_days} days ({age_days // 365}y {age_days % 365 // 30}m)"
             data = {'id':user.id,'first_name':getattr(user,'first_name',None),'last_name':getattr(user,'last_name',None),
                     'usernames':unames,'phone':getattr(user,'phone',None),'bio':bio_text,
                     'verified':getattr(user,'verified',False),'premium':getattr(user,'premium',False),
                     'bot':getattr(user,'bot',False),'scam':getattr(user,'scam',False),'fake':getattr(user,'fake',False),
                     'restricted':getattr(user,'restricted',False),'common_chats_count':ccnt,'common_chats':common_chats,
-                    'gifts':gifts,'links_in_bio':bio_links,'last_online':format_status(getattr(user,'status',None))}
+                    'gifts':gifts,'links_in_bio':bio_links,'last_online':format_status(getattr(user,'status',None)),
+                    'registration_date': registration_date_str, 'account_age': account_age_str}
+            if getattr(user, 'lang_code', None): data['lang_code'] = user.lang_code
             if uf:
                 if getattr(uf,'wallpaper',None): data['wallpaper']=True
                 if hasattr(uf,'stories_count'): data['stories_count']=uf.stories_count
                 if hasattr(uf,'followers_count'): data['followers_count']=uf.followers_count
+                if getattr(uf,'contacts_count',None): data['contacts_count']=uf.contacts_count
+                es = getattr(uf,'emoji_status',None)
+                if es and type(es).__name__ != 'EmojiStatusEmpty':
+                    data['emoji_status'] = str(es)
+                pa = getattr(uf,'phone_calls_available',None)
+                if pa is not None: data['phone_calls'] = 'available' if pa else 'private'
+                vm = getattr(uf,'voice_messages_forbidden',None)
+                if vm is not None: data['voice_messages'] = 'disabled' if vm else 'enabled'
+                ttl = getattr(uf,'ttl_period',None)
+                if ttl: data['auto_delete'] = f'{ttl // 86400} days' if ttl >= 86400 else f'{ttl}s'
+                fwd = getattr(uf,'private_forward_name',None)
+                if fwd: data['forward_name'] = fwd
+                sg_cnt = getattr(uf, 'stargifts_count', None)
+                if sg_cnt is not None: data['stargifts_count'] = sg_cnt
+            try:
+                photos = await client.get_profile_photos(user.id, limit=10)
+                data['photos_count'] = len(photos)
+            except: pass
+            try:
+                photo_b64 = await get_profile_photo_b64(client, user)
+                if photo_b64: data['photo_b64'] = photo_b64
+            except: pass
             path = os.path.join(os.getcwd(),fname)
             with open(path,'w',encoding='utf-8') as f: f.write(build_info_html(data))
             dname = data.get('first_name') or str(user.id)
@@ -802,11 +1117,12 @@ async def main():
             uf = getattr(raw,'full_user',raw)
             common_chats = []
             try:
-                cc = await client(GetCommonChatsRequest(peer=user,max_id=0,limit=100))
-                common_chats = [{'id':ch.id,'title':getattr(ch,'title',str(ch.id))} for ch in cc.chats]
+                common_chats = await get_user_chats(client, user, limit=100)
             except: pass
+            ccnt = len(common_chats)
             gifts = await get_gifts(client,user.id)
             bio_text = (getattr(uf,'about','') or '') if uf else ''
+            bio_links = re.findall(r'https?://[^\s]+|@[a-zA-Z0-9_]+',bio_text)
             unames = []
             if getattr(user,'username',None):
                 unames.append({'username':user.username,'active':True,'nft':False})
@@ -815,16 +1131,50 @@ async def main():
                     e = {'username':getattr(u,'username',str(u)),'active':getattr(u,'active',False),'nft':getattr(u,'editable',None) is False}
                     if not any(x['username']==e['username'] for x in unames): unames.append(e)
             ccnt = (getattr(uf,'common_chats_count',0) or len(common_chats)) if uf else len(common_chats)
+            reg_date = getattr(user, 'date', None)
+            registration_date_str = ''; account_age_str = ''
+            if reg_date:
+                if isinstance(reg_date, datetime): dt = reg_date
+                elif isinstance(reg_date, (int, float)): dt = datetime.fromtimestamp(reg_date)
+                else: dt = None
+                if dt:
+                    registration_date_str = dt.strftime('%Y-%m-%d %H:%M:%S UTC')
+                    age_days = (datetime.now() - dt).days
+                    account_age_str = f"{age_days} days ({age_days // 365}y {age_days % 365 // 30}m)"
             data = {'id':user.id,'first_name':getattr(user,'first_name',None),'last_name':getattr(user,'last_name',None),
                     'usernames':unames,'phone':getattr(user,'phone',None),'bio':bio_text,
                     'verified':getattr(user,'verified',False),'premium':getattr(user,'premium',False),
                     'bot':getattr(user,'bot',False),'scam':getattr(user,'scam',False),'fake':getattr(user,'fake',False),
                     'restricted':getattr(user,'restricted',False),'common_chats_count':ccnt,'common_chats':common_chats,
-                    'gifts':gifts,'last_online':format_status(getattr(user,'status',None))}
+                    'gifts':gifts,'links_in_bio':bio_links,'last_online':format_status(getattr(user,'status',None)),
+                    'registration_date': registration_date_str, 'account_age': account_age_str}
+            if getattr(user, 'lang_code', None): data['lang_code'] = user.lang_code
             if uf:
                 if getattr(uf,'wallpaper',None): data['wallpaper']=True
                 if hasattr(uf,'stories_count'): data['stories_count']=uf.stories_count
                 if hasattr(uf,'followers_count'): data['followers_count']=uf.followers_count
+                if getattr(uf,'contacts_count',None): data['contacts_count']=uf.contacts_count
+                es = getattr(uf,'emoji_status',None)
+                if es and type(es).__name__ != 'EmojiStatusEmpty':
+                    data['emoji_status'] = str(es)
+                pa = getattr(uf,'phone_calls_available',None)
+                if pa is not None: data['phone_calls'] = 'available' if pa else 'private'
+                vm = getattr(uf,'voice_messages_forbidden',None)
+                if vm is not None: data['voice_messages'] = 'disabled' if vm else 'enabled'
+                ttl = getattr(uf,'ttl_period',None)
+                if ttl: data['auto_delete'] = f'{ttl // 86400} days' if ttl >= 86400 else f'{ttl}s'
+                fwd = getattr(uf,'private_forward_name',None)
+                if fwd: data['forward_name'] = fwd
+                sg_cnt = getattr(uf, 'stargifts_count', None)
+                if sg_cnt is not None: data['stargifts_count'] = sg_cnt
+            try:
+                photos = await client.get_profile_photos(user.id, limit=10)
+                data['photos_count'] = len(photos)
+            except: pass
+            try:
+                photo_b64 = await get_profile_photo_b64(client, user)
+                if photo_b64: data['photo_b64'] = photo_b64
+            except: pass
             path = os.path.join(os.getcwd(),fname)
             with open(path,'w',encoding='utf-8') as f: f.write(build_info_html(data))
             dname = data.get('first_name') or str(user.id)
@@ -886,7 +1236,7 @@ async def main():
     print()
     print(GL.box(" COMMANDS ", [
         ".help  .id  .whois  .info  .logs  .neuro",
-        ".stats  .chats  .top  .activity  .search  .afk",
+        ".stats  .chats  .commonchats  .top  .activity  .search  .afk",
         ".ping  .echo  .type  .purge  .save  .notes  .system",
     ], 56))
     print()
